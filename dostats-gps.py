@@ -2,7 +2,7 @@
 
 # Compute statistics from NMEA GPS / GNSS log files
 # shows stats for separate 15-minute blocks
-# J.Beale 2025-07-04
+# J.Beale 2025-07-05
 
 import pynmea2
 import math
@@ -168,7 +168,7 @@ def calculate_block_stats(lat_lon_alt_data, sat_counts, snrs, hdops, vdops):
     }
 
 
-def showMeans(df):
+def showMeans(df, date_str):
     # ---- Altitude Quality Analysis ----
 
     # Simple mean of all altitude values
@@ -210,20 +210,20 @@ def showMeans(df):
     estimates = [simple_mean, filtered_mean, weighted_zsd, weighted_vdop]
     diff = max(estimates) - min(estimates)
     total = valid_rows['Npts'].sum()
+    days = total / (60*60*24)
 
     # Return comment lines to optionally write to file
     comment_lines = [
-        f"# Altitude Estimates:",
+        f"# Averages for {date_str}",
         f"# Simple Mean Altitude:       {simple_mean:7.2f} m",
         f"# Filtered Mean Altitude:     {filtered_mean:7.2f} m",
-        f"# Filtered Mean Latitude:     {filtered_mean_lat:10.6f}",
-        f"# Filtered Mean Longitude:    {filtered_mean_lon:10.6f}",
+        f"# Filtered Mean Lat Lon:       {filtered_mean_lat:10.7f} {filtered_mean_lon:10.7f}",
         f"# Weighted Mean (1/z_SD):     {weighted_zsd:7.2f} m",
         f"# Weighted Mean (1/vdop):     {weighted_vdop:7.2f} m",
         f"# Max diff of these 4:        {diff:7.2f} m",
         f"# Fraction of data used:      {filtered_fraction:7.1%}",
         f"# Wgt. Corr. (z_SD vs vdop):  {correlation:7.4f}",
-        f"# Total points (= seconds):    {total}"
+        f"# Seconds (days):              {total} ({days:5.3f})"
     ]
     return comment_lines
 
@@ -272,11 +272,12 @@ if __name__ == '__main__':
     print()
 
 
-    showMeans(df) # show best estimates of altitude
+    first_date = df['block_start_utc'].iloc[0][:10].replace('-', '')
+
+    comment_lines = showMeans(df, first_date)
     fout = input_file[:-4] + "_stats.csv"
     
     # Write CSV with comment header
-    comment_lines = showMeans(df)  # Also prints to screen
     with open(fout, 'w') as f:
         for line in comment_lines:
             print(line)
@@ -284,4 +285,3 @@ if __name__ == '__main__':
         df.to_csv(f, index=False)
     
     print(f"\nStatistics written to {fout}")
-
