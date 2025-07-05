@@ -8,6 +8,7 @@ import pynmea2
 import math
 import sys
 import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
@@ -27,11 +28,11 @@ def haversine(lat1, lon1, lat2, lon2):
 
 def safe_stats(values):
     if not values:
-        return (None, None, None)
+        return (np.nan, np.nan, np.nan)
     return (
-        sum(values) / len(values),
-        min(values),
-        max(values)
+        float(sum(values)) / len(values),
+        float(min(values)),
+        float(max(values))
     )
 
 def parse_nmea_log(file_path):
@@ -257,6 +258,16 @@ if __name__ == '__main__':
     df['snr_av'] = df['snr_av'].round(2)
     df['SV_av'] = df['SV_av'].round(2)
     df['vdop'] = df['vdop'].round(2)
+    
+    numeric_cols = [
+        'lat', 'lon', 'z_m', 'z_SD', 'zRng_m', 'Hdev_SD', 'Hdev_m',
+        'Npts', 'SV_av', 'SV_min', 'SV_max', 'snr_av', 'smin', 'smax',
+        'vdop', 'vd_min', 'vd_max'
+    ]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
     print(df.to_string(index=False))
     print()
 
