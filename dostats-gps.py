@@ -8,7 +8,7 @@ import pynmea2
 import math
 import sys
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
 def convert_to_decimal(coord, direction):
@@ -35,6 +35,7 @@ def safe_stats(values):
     )
 
 def parse_nmea_log(file_path):
+    from collections import defaultdict
     blocks = defaultdict(list)
     snrs_by_block = defaultdict(list)
     sat_counts_by_block = defaultdict(list)
@@ -42,6 +43,7 @@ def parse_nmea_log(file_path):
     vdops_by_block = defaultdict(list)
     last_timestamp = None
     current_utc_date = None
+    gpgga_buffer = []
 
     with open(file_path, 'r') as f:
         for line in f:
@@ -56,23 +58,37 @@ def parse_nmea_log(file_path):
                         month = int(date_str[2:4])
                         year = int(date_str[4:6]) + 2000
                         current_utc_date = datetime(year, month, day)
+                        # Process any buffered GPGGA lines now that we have the date
+                        for gpgga_line in gpgga_buffer:
+                            try:
+                                msg = pynmea2.parse(gpgga_line)
+                                dt = datetime.combine(current_utc_date.date(), msg.timestamp, tzinfo=timezone.utc)
+                                last_timestamp = dt
+                                minute_block = (dt.minute // 15) * 15
+                                block_start = dt.replace(minute=minute_block, second=0, microsecond=0, tzinfo=timezone.utc)
+                                lat = convert_to_decimal(msg.lat, msg.lat_dir)
+                                lon = convert_to_decimal(msg.lon, msg.lon_dir)
+                                alt = float(msg.altitude)
+                                blocks[block_start].append((lat, lon, alt))
+                            except Exception:
+                                continue
+                        gpgga_buffer = []
                 except:
                     continue
 
             elif line.startswith('$GPGGA') or line.startswith('$GNGGA'):
+                if not current_utc_date:
+                    gpgga_buffer.append(line)
+                    continue  # skip until date is known
                 try:
                     msg = pynmea2.parse(line)
-                    if not current_utc_date:
-                        continue  # skip until date is known
-                    dt = datetime.combine(current_utc_date.date(), msg.timestamp)
+                    dt = datetime.combine(current_utc_date.date(), msg.timestamp, tzinfo=timezone.utc)
                     last_timestamp = dt
-                    minute_block = (dt.minute // 15) * 15 # length of block in minutes
-                    block_start = dt.replace(minute=minute_block, second=0, microsecond=0)
-
+                    minute_block = (dt.minute // 15) * 15
+                    block_start = dt.replace(minute=minute_block, second=0, microsecond=0, tzinfo=timezone.utc)
                     lat = convert_to_decimal(msg.lat, msg.lat_dir)
                     lon = convert_to_decimal(msg.lon, msg.lon_dir)
                     alt = float(msg.altitude)
-
                     blocks[block_start].append((lat, lon, alt))
                 except Exception:
                     continue
@@ -109,7 +125,7 @@ def parse_nmea_log(file_path):
     return blocks, sat_counts_by_block, snrs_by_block, hdops_by_block, vdops_by_block
 
 def calculate_block_stats(lat_lon_alt_data, sat_counts, snrs, hdops, vdops):
-    lats, lons, alts = zip(*lat_lon_alt_data) if lat_lon_alt_data else ([], [], [])
+    lats, lons, alts = zip(*lat_lon_alt_data) if lat_lon_alt_data else ([], [], [], [])
 
     if not lats:
         return {}
@@ -196,9 +212,11 @@ def showMeans(df):
 
     # Return comment lines to optionally write to file
     comment_lines = [
+        f"# Altitude Estimates:",
         f"# Simple Mean Altitude:       {simple_mean:7.2f} m",
         f"# Filtered Mean Altitude:     {filtered_mean:7.2f} m",
-        f"# Filtered Mean Lat/Lon:       {filtered_mean_lat:10.7f} {filtered_mean_lon:10.7f}",
+        f"# Filtered Mean Latitude:     {filtered_mean_lat:10.6f}",
+        f"# Filtered Mean Longitude:    {filtered_mean_lon:10.6f}",
         f"# Weighted Mean (1/z_SD):     {weighted_zsd:7.2f} m",
         f"# Weighted Mean (1/vdop):     {weighted_vdop:7.2f} m",
         f"# Max diff of these 4:        {diff:7.2f} m",
@@ -246,7 +264,7 @@ if __name__ == '__main__':
     showMeans(df) # show best estimates of altitude
     fout = input_file[:-4] + "_stats.csv"
     
-    print(f"\nStatistics for {fout}")
+    # Write CSV with comment header
     comment_lines = showMeans(df)  # Also prints to screen
     with open(fout, 'w') as f:
         for line in comment_lines:
@@ -254,3 +272,5 @@ if __name__ == '__main__':
             f.write(line + "\n")
         df.to_csv(f, index=False)
     
+    print(f"\nStatistics written to {fout}")
+
