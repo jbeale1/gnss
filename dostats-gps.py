@@ -2,7 +2,7 @@
 
 # Compute statistics from NMEA GPS / GNSS log files
 # shows stats for separate 15-minute blocks
-# J.Beale 2025-07-05
+# J.Beale 2025-07-06
 
 import pynmea2
 import math
@@ -35,6 +35,7 @@ def safe_stats(values):
         float(max(values))
     )
 
+
 def parse_nmea_log(file_path):
     from collections import defaultdict
     blocks = defaultdict(list)
@@ -45,6 +46,7 @@ def parse_nmea_log(file_path):
     last_timestamp = None
     current_utc_date = None
     gpgga_buffer = []
+    seen_timestamps = set()  # track possible duplicates
 
     with open(file_path, 'r') as f:
         for line in f:
@@ -65,12 +67,16 @@ def parse_nmea_log(file_path):
                                 msg = pynmea2.parse(gpgga_line)
                                 dt = datetime.combine(current_utc_date.date(), msg.timestamp, tzinfo=timezone.utc)
                                 last_timestamp = dt
-                                minute_block = (dt.minute // 15) * 15
-                                block_start = dt.replace(minute=minute_block, second=0, microsecond=0, tzinfo=timezone.utc)
-                                lat = convert_to_decimal(msg.lat, msg.lat_dir)
-                                lon = convert_to_decimal(msg.lon, msg.lon_dir)
-                                alt = float(msg.altitude)
-                                blocks[block_start].append((lat, lon, alt))
+                                
+                                timestamp_key = dt.strftime('%H:%M:%S')
+                                if timestamp_key not in seen_timestamps:
+                                    seen_timestamps.add(timestamp_key)
+                                    minute_block = (dt.minute // 15) * 15
+                                    block_start = dt.replace(minute=minute_block, second=0, microsecond=0, tzinfo=timezone.utc)
+                                    lat = convert_to_decimal(msg.lat, msg.lat_dir)
+                                    lon = convert_to_decimal(msg.lon, msg.lon_dir)
+                                    alt = float(msg.altitude)
+                                    blocks[block_start].append((lat, lon, alt))
                             except Exception:
                                 continue
                         gpgga_buffer = []
@@ -85,12 +91,16 @@ def parse_nmea_log(file_path):
                     msg = pynmea2.parse(line)
                     dt = datetime.combine(current_utc_date.date(), msg.timestamp, tzinfo=timezone.utc)
                     last_timestamp = dt
-                    minute_block = (dt.minute // 15) * 15
-                    block_start = dt.replace(minute=minute_block, second=0, microsecond=0, tzinfo=timezone.utc)
-                    lat = convert_to_decimal(msg.lat, msg.lat_dir)
-                    lon = convert_to_decimal(msg.lon, msg.lon_dir)
-                    alt = float(msg.altitude)
-                    blocks[block_start].append((lat, lon, alt))
+                    
+                    timestamp_key = dt.strftime('%H:%M:%S')
+                    if timestamp_key not in seen_timestamps:
+                        seen_timestamps.add(timestamp_key)
+                        minute_block = (dt.minute // 15) * 15
+                        block_start = dt.replace(minute=minute_block, second=0, microsecond=0, tzinfo=timezone.utc)
+                        lat = convert_to_decimal(msg.lat, msg.lat_dir)
+                        lon = convert_to_decimal(msg.lon, msg.lon_dir)
+                        alt = float(msg.altitude)
+                        blocks[block_start].append((lat, lon, alt))
                 except Exception:
                     continue
 
@@ -99,15 +109,26 @@ def parse_nmea_log(file_path):
                 minute_block = (last_timestamp.minute // 15) * 15
                 block_start = last_timestamp.replace(minute=minute_block, second=0, microsecond=0)
                 try:
-                    if len(parts) >= 4 and parts[2] == '1':
+                    # validation for GPGSV sentences
+                    if (len(parts) >= 4 and
+                        parts[2] == '1' and  # First sentence in group
+                        parts[1].isdigit() and  # Total sentences should be numeric
+                        parts[3].isdigit() and  # Satellite count should be numeric
+                        1 <= int(parts[1]) <= 9 and  # Reasonable total sentences (1-9)
+                        0 <= int(parts[3]) <= 50):   # Reasonable satellite count (0-50)
+                        
                         sat_counts_by_block[block_start].append(int(parts[3]))
+                    
+                    # Parse SNR values with validation
                     for i in range(7, len(parts), 4):
-                        try:
-                            snr = int(parts[i])
-                            snrs_by_block[block_start].append(snr)
-                        except:
-                            continue
-                except:
+                        if i < len(parts) and parts[i].isdigit():
+                            try:
+                                snr = int(parts[i])
+                                if 0 <= snr <= 99:  # Valid SNR range
+                                    snrs_by_block[block_start].append(snr)
+                            except (ValueError, IndexError):
+                                continue
+                except (ValueError, IndexError):
                     continue
 
             elif (line.startswith('$GPGSA') or line.startswith('$GNGSA')) and last_timestamp:
@@ -285,3 +306,4 @@ if __name__ == '__main__':
         df.to_csv(f, index=False)
     
     print(f"\nStatistics written to {fout}")
+    
