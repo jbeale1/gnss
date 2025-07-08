@@ -2,7 +2,7 @@
 
 # Compute statistics from NMEA GPS / GNSS log files
 # shows stats for separate 15-minute blocks
-# J.Beale 2025-07-06
+# J.Beale 2025-07-08
 
 import pynmea2
 import math
@@ -235,10 +235,9 @@ def showMeans(df, date_str):
 
     # Return comment lines to optionally write to file
     comment_lines = [
-        f"# Averages for {date_str}",
+        f"# {date_str}, {filtered_mean_lat:10.7f}, {filtered_mean_lon:10.7f}, {filtered_mean:6.2f}, {days:5.3f}",
         f"# Simple Mean Altitude:       {simple_mean:7.2f} m",
         f"# Filtered Mean Altitude:     {filtered_mean:7.2f} m",
-        f"# Filtered Mean Lat Lon:       {filtered_mean_lat:10.7f} {filtered_mean_lon:10.7f}",
         f"# Weighted Mean (1/z_SD):     {weighted_zsd:7.2f} m",
         f"# Weighted Mean (1/vdop):     {weighted_vdop:7.2f} m",
         f"# Max diff of these 4:        {diff:7.2f} m",
@@ -306,4 +305,3 @@ if __name__ == '__main__':
         df.to_csv(f, index=False)
     
     print(f"\nStatistics written to {fout}")
-    
