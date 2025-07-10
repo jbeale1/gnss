@@ -2,7 +2,7 @@
 
 # Compute statistics from NMEA GPS / GNSS log files
 # shows stats for separate 15-minute blocks
-# J.Beale 2025-07-08
+# J.Beale 2025-07-09
 
 import pynmea2
 import math
@@ -43,14 +43,21 @@ def parse_nmea_log(file_path):
     sat_counts_by_block = defaultdict(list)
     hdops_by_block = defaultdict(list)
     vdops_by_block = defaultdict(list)
+    prns_by_block = defaultdict(set)
     last_timestamp = None
     current_utc_date = None
     gpgga_buffer = []
     seen_timestamps = set()  # track possible duplicates
 
-    with open(file_path, 'r') as f:
-        for line in f:
-            line = line.strip()
+    with open(file_path, 'rb') as f:  # Open in binary mode
+        for raw_line in f:
+            try:
+                line = raw_line.decode('ascii', errors='strict').strip()
+            except UnicodeDecodeError:
+                continue  # Skip binary or non-ASCII lines
+
+            if not line.startswith('$'):
+                continue  # Skip non-NMEA lines
 
             if line.startswith('$GPRMC') or line.startswith('$GNRMC'):
                 try:
@@ -67,7 +74,7 @@ def parse_nmea_log(file_path):
                                 msg = pynmea2.parse(gpgga_line)
                                 dt = datetime.combine(current_utc_date.date(), msg.timestamp, tzinfo=timezone.utc)
                                 last_timestamp = dt
-                                
+
                                 timestamp_key = dt.strftime('%H:%M:%S')
                                 if timestamp_key not in seen_timestamps:
                                     seen_timestamps.add(timestamp_key)
@@ -91,7 +98,7 @@ def parse_nmea_log(file_path):
                     msg = pynmea2.parse(line)
                     dt = datetime.combine(current_utc_date.date(), msg.timestamp, tzinfo=timezone.utc)
                     last_timestamp = dt
-                    
+
                     timestamp_key = dt.strftime('%H:%M:%S')
                     if timestamp_key not in seen_timestamps:
                         seen_timestamps.add(timestamp_key)
@@ -104,11 +111,20 @@ def parse_nmea_log(file_path):
                 except Exception:
                     continue
 
-            elif line.startswith('$GPGSV') and last_timestamp:
+            elif (line.startswith('$GPGSV') or 
+                  line.startswith('$GLGSV') or 
+                  line.startswith('$GAGSV') or 
+                  line.startswith('$BDGSV') or 
+                  line.startswith('$GNGSV')) and last_timestamp:
                 parts = line.split(',')
                 minute_block = (last_timestamp.minute // 15) * 15
                 block_start = last_timestamp.replace(minute=minute_block, second=0, microsecond=0)
                 try:
+                    # Each GSV sentence: PRNs are at positions 4, 8, 12, 16
+                    for i in [4, 8, 12, 16]:
+                        if i < len(parts) and parts[i].isdigit():
+                            prns_by_block[block_start].add(int(parts[i]))
+
                     # validation for GPGSV sentences
                     if (len(parts) >= 4 and
                         parts[2] == '1' and  # First sentence in group
@@ -116,9 +132,9 @@ def parse_nmea_log(file_path):
                         parts[3].isdigit() and  # Satellite count should be numeric
                         1 <= int(parts[1]) <= 9 and  # Reasonable total sentences (1-9)
                         0 <= int(parts[3]) <= 50):   # Reasonable satellite count (0-50)
-                        
+
                         sat_counts_by_block[block_start].append(int(parts[3]))
-                    
+
                     # Parse SNR values with validation
                     for i in range(7, len(parts), 4):
                         if i < len(parts) and parts[i].isdigit():
@@ -144,9 +160,9 @@ def parse_nmea_log(file_path):
                 except:
                     continue
 
-    return blocks, sat_counts_by_block, snrs_by_block, hdops_by_block, vdops_by_block
+    return blocks, sat_counts_by_block, snrs_by_block, hdops_by_block, vdops_by_block, prns_by_block
 
-def calculate_block_stats(lat_lon_alt_data, sat_counts, snrs, hdops, vdops):
+def calculate_block_stats(lat_lon_alt_data, sat_counts, snrs, hdops, vdops, prns):
     lats, lons, alts = zip(*lat_lon_alt_data) if lat_lon_alt_data else ([], [], [], [])
 
     if not lats:
@@ -168,6 +184,9 @@ def calculate_block_stats(lat_lon_alt_data, sat_counts, snrs, hdops, vdops):
     hdop_mean, hdop_min, hdop_max = safe_stats(hdops)
     vdop_mean, vdop_min, vdop_max = safe_stats(vdops)
 
+    # Use the number of unique PRNs seen in the block as the true SV count
+    sv_count = len(prns) if prns is not None else np.nan
+
     return {
         'lat': avg_lat,
         'lon': avg_lon,
@@ -177,6 +196,7 @@ def calculate_block_stats(lat_lon_alt_data, sat_counts, snrs, hdops, vdops):
         'Hdev_SD': horiz_std,
         'Hdev_m': horiz_max,
         'Npts': len(lat_lon_alt_data),
+        'SV_count': sv_count,  # <-- new field for unique satellites
         'SV_av': sat_mean,
         'SV_min': sat_min,
         'SV_max': sat_max,
@@ -255,7 +275,7 @@ if __name__ == '__main__':
         sys.exit(1)
 
     input_file = sys.argv[1]
-    blocks, sats, snrs, hdops, vdops = parse_nmea_log(input_file)
+    blocks, sats, snrs, hdops, vdops, prns_by_block = parse_nmea_log(input_file)
 
     rows = []
     for block in sorted(blocks):
@@ -264,7 +284,8 @@ if __name__ == '__main__':
             sats.get(block, []),
             snrs.get(block, []),
             hdops.get(block, []),
-            vdops.get(block, [])
+            vdops.get(block, []),
+            prns_by_block.get(block, set())  # pass the set of PRNs for this block
         )
         stats['block_start_utc'] = block.strftime('%Y-%m-%d %H:%M:%S')
         rows.append(stats)
