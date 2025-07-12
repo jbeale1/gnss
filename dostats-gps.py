@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
 # Compute statistics from NMEA GPS / GNSS log files
-# shows stats for separate 15-minute blocks
-# J.Beale 2025-07-09
+# shows stats for separate 15-minute blocks (or other N)
+# J.Beale 2025-07-12
 
 import pynmea2
 import math
@@ -11,6 +11,9 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
+import os
+
+VERSION = "DoStats-GPS v1.4 2025-07-12"
 
 def convert_to_decimal(coord, direction):
     degrees = int(float(coord) / 100)
@@ -36,7 +39,15 @@ def safe_stats(values):
     )
 
 
-def parse_nmea_log(file_path):
+def get_block_start(dt, block_size):
+    """Return the datetime rounded down to the nearest block_size minutes."""
+    total_minutes = dt.hour * 60 + dt.minute
+    block_start_minutes = (total_minutes // block_size) * block_size
+    block_hour = block_start_minutes // 60
+    block_minute = block_start_minutes % 60
+    return dt.replace(hour=block_hour, minute=block_minute, second=0, microsecond=0, tzinfo=dt.tzinfo)
+
+def parse_nmea_log(file_path, block_size=15):
     from collections import defaultdict
     blocks = defaultdict(list)
     snrs_by_block = defaultdict(list)
@@ -78,8 +89,7 @@ def parse_nmea_log(file_path):
                                 timestamp_key = dt.strftime('%H:%M:%S')
                                 if timestamp_key not in seen_timestamps:
                                     seen_timestamps.add(timestamp_key)
-                                    minute_block = (dt.minute // 15) * 15
-                                    block_start = dt.replace(minute=minute_block, second=0, microsecond=0, tzinfo=timezone.utc)
+                                    block_start = get_block_start(dt, block_size)
                                     lat = convert_to_decimal(msg.lat, msg.lat_dir)
                                     lon = convert_to_decimal(msg.lon, msg.lon_dir)
                                     alt = float(msg.altitude)
@@ -102,8 +112,7 @@ def parse_nmea_log(file_path):
                     timestamp_key = dt.strftime('%H:%M:%S')
                     if timestamp_key not in seen_timestamps:
                         seen_timestamps.add(timestamp_key)
-                        minute_block = (dt.minute // 15) * 15
-                        block_start = dt.replace(minute=minute_block, second=0, microsecond=0, tzinfo=timezone.utc)
+                        block_start = get_block_start(dt, block_size)
                         lat = convert_to_decimal(msg.lat, msg.lat_dir)
                         lon = convert_to_decimal(msg.lon, msg.lon_dir)
                         alt = float(msg.altitude)
@@ -117,8 +126,7 @@ def parse_nmea_log(file_path):
                   line.startswith('$BDGSV') or 
                   line.startswith('$GNGSV')) and last_timestamp:
                 parts = line.split(',')
-                minute_block = (last_timestamp.minute // 15) * 15
-                block_start = last_timestamp.replace(minute=minute_block, second=0, microsecond=0)
+                block_start = get_block_start(last_timestamp, block_size)
                 try:
                     # Each GSV sentence: PRNs are at positions 4, 8, 12, 16
                     for i in [4, 8, 12, 16]:
@@ -149,8 +157,7 @@ def parse_nmea_log(file_path):
 
             elif (line.startswith('$GPGSA') or line.startswith('$GNGSA')) and last_timestamp:
                 parts = line.split(',')
-                minute_block = (last_timestamp.minute // 15) * 15
-                block_start = last_timestamp.replace(minute=minute_block, second=0, microsecond=0)
+                block_start = get_block_start(last_timestamp, block_size)
                 try:
                     if len(parts) >= 18:
                         hdop = float(parts[16])
@@ -218,6 +225,7 @@ def showMeans(df, date_str):
     # Filter for high-quality data
     filtered_df = df[(df['z_SD'] < 1.5) & (df['vdop'] < 2.0) & (df['snr_av'] > 35)]
     filtered_mean = filtered_df['z_m'].mean()
+    filtered_snr_av = filtered_df['snr_av'].mean()
 
     # Filtered Mean Latitude and Longitude
     filtered_mean_lat = filtered_df['lat'].mean()
@@ -231,8 +239,20 @@ def showMeans(df, date_str):
     valid_vdop = df['vdop'] > 0
     weighted_vdop = (df.loc[valid_vdop, 'z_m'] / df.loc[valid_vdop, 'vdop']).sum() / (1 / df.loc[valid_vdop, 'vdop']).sum()
 
+    # --- New: Weighted mean for top 50% snr_av blocks ---
+    snr_sorted = df.sort_values('snr_av', ascending=False)
+    n_top = max(1, len(snr_sorted) // 2)
+    top_snr = snr_sorted.iloc[:n_top]
+    weighted_snr = np.nan
+    if not top_snr.empty and (top_snr['snr_av'] > 0).any():
+        weights = top_snr['snr_av']
+        weighted_snr = (top_snr['z_m'] * weights).sum() / weights.sum()
+
     # Fraction of data included in filtered mean
     filtered_fraction = len(filtered_df) / len(df)
+
+    # Calculate average SV_count for filtered blocks
+    filtered_sv_count = filtered_df['SV_count'].mean() if 'SV_count' in filtered_df.columns else np.nan
 
     # Only consider rows with valid (positive) z_SD and vdop to avoid division by zero
     valid_rows = df[(df['z_SD'] > 0) & (df['vdop'] > 0)].copy()
@@ -248,20 +268,25 @@ def showMeans(df, date_str):
     # Compute Pearson correlation coefficient
     correlation = valid_rows[['weight_zsd_norm', 'weight_vdop_norm']].corr().iloc[0, 1]
 
-    estimates = [simple_mean, filtered_mean, weighted_zsd, weighted_vdop]
+    # --- Add weighted_snr to the estimates and diff calculation ---
+    estimates = [simple_mean, filtered_mean, weighted_zsd, weighted_vdop, weighted_snr]
     diff = max(estimates) - min(estimates)
     total = valid_rows['Npts'].sum()
     days = total / (60*60*24)
 
     # Return comment lines to optionally write to file
     comment_lines = [
-        f"# {date_str}, {filtered_mean_lat:10.7f}, {filtered_mean_lon:10.7f}, {filtered_mean:6.2f}, {days:5.3f}",
-        f"# Simple Mean Altitude:       {simple_mean:7.2f} m",
-        f"# Filtered Mean Altitude:     {filtered_mean:7.2f} m",
-        f"# Weighted Mean (1/z_SD):     {weighted_zsd:7.2f} m",
-        f"# Weighted Mean (1/vdop):     {weighted_vdop:7.2f} m",
-        f"# Max diff of these 4:        {diff:7.2f} m",
+        f"# DATE,LAT,LON,MSL,SNR,DAYS",
+        f"## {date_str}, {filtered_mean_lat:10.7f}, {filtered_mean_lon:10.7f}, {filtered_mean:6.2f}, {filtered_snr_av:.2f}, {days:5.3f}",
+        f"# Simple Mean Altitude:       {simple_mean:7.3f} m",
+        f"# Filtered Mean Altitude:     {filtered_mean:7.3f} m",
+        f"# Weighted Mean (1/z_SD):     {weighted_zsd:7.3f} m",
+        f"# Weighted Mean (1/vdop):     {weighted_vdop:7.3f} m",
+        f"# Weighted Mean (top 50% SNR):{weighted_snr:7.3f} m",
+        f"# Max diff of these 5:        {diff:7.3f} m",
         f"# Fraction of data used:      {filtered_fraction:7.1%}",
+        f"# SV count (filtered):        {filtered_sv_count:.2f}",
+        f"# Avg snr_av (filtered):      {filtered_snr_av:7.2f}",
         f"# Wgt. Corr. (z_SD vs vdop):  {correlation:7.4f}",
         f"# Seconds (days):              {total} ({days:5.3f})"
     ]
@@ -270,12 +295,28 @@ def showMeans(df, date_str):
 
 # =============================================================================
 if __name__ == '__main__':
-    if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} input_file")
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} input_file [-nd] [-bs <block_size_minutes>]")
         sys.exit(1)
 
     input_file = sys.argv[1]
-    blocks, sats, snrs, hdops, vdops, prns_by_block = parse_nmea_log(input_file)
+    if not os.path.isfile(input_file):
+        print(f"Error: input file '{input_file}' does not exist.")
+        sys.exit(1)
+
+    no_details = "-nd" in sys.argv
+
+    block_size = 15
+    if "-bs" in sys.argv:
+        try:
+            idx = sys.argv.index("-bs")
+            block_size = int(sys.argv[idx + 1])
+        except (ValueError, IndexError):
+            print("Usage: -bs <block_size_minutes>")
+            sys.exit(1)
+
+    print(VERSION)
+    blocks, sats, snrs, hdops, vdops, prns_by_block = parse_nmea_log(input_file, block_size)
 
     rows = []
     for block in sorted(blocks):
@@ -285,12 +326,18 @@ if __name__ == '__main__':
             snrs.get(block, []),
             hdops.get(block, []),
             vdops.get(block, []),
-            prns_by_block.get(block, set())  # pass the set of PRNs for this block
+            prns_by_block.get(block, set())
         )
-        stats['block_start_utc'] = block.strftime('%Y-%m-%d %H:%M:%S')
-        rows.append(stats)
+        if stats:  # Only append if stats is not empty
+            stats['block_start_utc'] = block.strftime('%Y-%m-%d %H:%M:%S')
+            rows.append(stats)
 
     df = pd.DataFrame(rows)
+
+    if df.empty or 'z_m' not in df.columns:
+        print("No valid data found in input file.")
+        sys.exit(1)
+
     pd.set_option('display.precision', 7)
     df['z_m'] = df['z_m'].round(2)
     df['z_SD'] = df['z_SD'].round(3)
@@ -309,8 +356,9 @@ if __name__ == '__main__':
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    print(df.to_string(index=False))
-    print()
+    if not no_details:
+        print(df.to_string(index=False))
+        print()
 
 
     first_date = df['block_start_utc'].iloc[0][:10].replace('-', '')
@@ -326,3 +374,4 @@ if __name__ == '__main__':
         df.to_csv(f, index=False)
     
     print(f"\nStatistics written to {fout}")
+    
