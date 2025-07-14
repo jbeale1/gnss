@@ -2,7 +2,7 @@
 
 # Compute statistics from NMEA GPS / GNSS log files
 # shows stats for separate 15-minute blocks (or other N)
-# J.Beale 2025-07-12
+# J.Beale 2025-07-14
 
 import pynmea2
 import math
@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 import os
 
-VERSION = "DoStats-GPS v1.4 2025-07-12"
+VERSION = "DoStats-GPS v1.5 2025-07-14"
 
 def convert_to_decimal(coord, direction):
     degrees = int(float(coord) / 100)
@@ -216,7 +216,7 @@ def calculate_block_stats(lat_lon_alt_data, sat_counts, snrs, hdops, vdops, prns
     }
 
 
-def showMeans(df, date_str):
+def showMeans(df, date_str, block_size):
     # ---- Altitude Quality Analysis ----
 
     # Simple mean of all altitude values
@@ -276,15 +276,15 @@ def showMeans(df, date_str):
 
     # Return comment lines to optionally write to file
     comment_lines = [
-        f"# DATE,LAT,LON,MSL,SNR,DAYS",
-        f"## {date_str}, {filtered_mean_lat:10.7f}, {filtered_mean_lon:10.7f}, {filtered_mean:6.2f}, {filtered_snr_av:.2f}, {days:5.3f}",
+        f"# DATE,LAT,LON,MSL,DEV,SNR,DAYS,BLKSIZE",
+        f"## {date_str}, {filtered_mean_lat:10.7f}, {filtered_mean_lon:10.7f}, {filtered_mean:6.2f}, {diff:5.3f}, {filtered_snr_av:.2f}, {days:5.3f}, {block_size}",
         f"# Simple Mean Altitude:       {simple_mean:7.3f} m",
         f"# Filtered Mean Altitude:     {filtered_mean:7.3f} m",
         f"# Weighted Mean (1/z_SD):     {weighted_zsd:7.3f} m",
         f"# Weighted Mean (1/vdop):     {weighted_vdop:7.3f} m",
         f"# Weighted Mean (top 50% SNR):{weighted_snr:7.3f} m",
         f"# Max diff of these 5:        {diff:7.3f} m",
-        f"# Fraction of data used:      {filtered_fraction:7.1%}",
+        f"# Fraction of data used:      {filtered_fraction:7.1%} ({block_size})",
         f"# SV count (filtered):        {filtered_sv_count:.2f}",
         f"# Avg snr_av (filtered):      {filtered_snr_av:7.2f}",
         f"# Wgt. Corr. (z_SD vs vdop):  {correlation:7.4f}",
@@ -296,7 +296,7 @@ def showMeans(df, date_str):
 # =============================================================================
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} input_file [-nd] [-bs <block_size_minutes>]")
+        print(f"Usage: {sys.argv[0]} input_file [-nd] [-bs <block_size_minutes>] [-ub] [-ubs]")
         sys.exit(1)
 
     input_file = sys.argv[1]
@@ -305,6 +305,36 @@ if __name__ == '__main__':
         sys.exit(1)
 
     no_details = "-nd" in sys.argv
+    ultra_brief = "-ub" in sys.argv
+    ultra_brief_set = "-ubs" in sys.argv
+
+    # Handle -ubs (ultra brief set): run for block sizes 15, 30, 60 and print only the "##" line for each
+    if ultra_brief_set:
+        for bs in [15, 30, 60]:
+            blocks, sats, snrs, hdops, vdops, prns_by_block = parse_nmea_log(input_file, bs)
+            rows = []
+            for block in sorted(blocks):
+                stats = calculate_block_stats(
+                    blocks[block],
+                    sats.get(block, []),
+                    snrs.get(block, []),
+                    hdops.get(block, []),
+                    vdops.get(block, []),
+                    prns_by_block.get(block, set())
+                )
+                if stats:
+                    stats['block_start_utc'] = block.strftime('%Y-%m-%d %H:%M:%S')
+                    rows.append(stats)
+            df = pd.DataFrame(rows)
+            if df.empty or 'z_m' not in df.columns:
+                continue
+            first_date = df['block_start_utc'].iloc[0][:10].replace('-', '')
+            comment_lines = showMeans(df, first_date, bs)
+            for line in comment_lines:
+                if line.startswith("##"):
+                    print(line)
+                    break
+        sys.exit(0)
 
     block_size = 15
     if "-bs" in sys.argv:
@@ -315,7 +345,8 @@ if __name__ == '__main__':
             print("Usage: -bs <block_size_minutes>")
             sys.exit(1)
 
-    print(VERSION)
+    if not ultra_brief:
+        print(VERSION)
     blocks, sats, snrs, hdops, vdops, prns_by_block = parse_nmea_log(input_file, block_size)
 
     rows = []
@@ -356,16 +387,23 @@ if __name__ == '__main__':
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
+    first_date = df['block_start_utc'].iloc[0][:10].replace('-', '')
+
+    comment_lines = showMeans(df, first_date, block_size)
+    fout = input_file[:-4] + "_stats.csv"
+    
+    if ultra_brief:
+        # Only print the line starting with "##"
+        for line in comment_lines:
+            if line.startswith("##"):
+                print(line)
+                break
+        sys.exit(0)
+
     if not no_details:
         print(df.to_string(index=False))
         print()
 
-
-    first_date = df['block_start_utc'].iloc[0][:10].replace('-', '')
-
-    comment_lines = showMeans(df, first_date)
-    fout = input_file[:-4] + "_stats.csv"
-    
     # Write CSV with comment header
     with open(fout, 'w') as f:
         for line in comment_lines:
@@ -374,4 +412,3 @@ if __name__ == '__main__':
         df.to_csv(f, index=False)
     
     print(f"\nStatistics written to {fout}")
-    
