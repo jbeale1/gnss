@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 import os
 
-VERSION = "DoStats-GPS v1.5 2025-07-14"
+VERSION = "DoStats-GPS v1.57 2025-07-18"
 
 def convert_to_decimal(coord, direction):
     degrees = int(float(coord) / 100)
@@ -222,8 +222,29 @@ def showMeans(df, date_str, block_size):
     # Simple mean of all altitude values
     simple_mean = df['z_m'].mean()
 
-    # Filter for high-quality data
-    filtered_df = df[(df['z_SD'] < 1.5) & (df['vdop'] < 2.0) & (df['snr_av'] > 35)]
+    # Filter based on hardcoded threshold for high-quality data
+    # filtered_df = df[(df['z_SD'] < 1.5) & (df['vdop'] < 2.0) & (df['snr_av'] > 35)]
+    # filtered_df = df[(df['z_SD'] < 1.35) & (df['vdop'] < 2.0) & (df['snr_av'] > 35)]
+
+    # Compute adaptive thresholds (Nth percentile for each)
+    z_sd_thresh = df['z_SD'].quantile(0.85)
+    vdop_thresh = df['vdop'].quantile(0.85)
+    snr_av_thresh = df['snr_av'].quantile(0.1)
+
+    # Filter out rows with the worst stats on any parameter
+    filtered_df = df[
+        (df['z_SD'] < z_sd_thresh) &
+        (df['vdop'] < vdop_thresh) &
+        (df['snr_av'] > snr_av_thresh)
+    ]
+    # If no rows remain after filtering, return empty comment lines
+    if filtered_df.empty:
+        return [
+            f"# DATE,LAT,LON,MSL,DEV,SNR,DAYS,BLKSIZE",
+            f"## {date_str}, No valid data after filtering with block size {block_size} minutes."
+        ]
+
+
     filtered_mean = filtered_df['z_m'].mean()
     filtered_snr_av = filtered_df['snr_av'].mean()
 
@@ -308,9 +329,9 @@ if __name__ == '__main__':
     ultra_brief = "-ub" in sys.argv
     ultra_brief_set = "-ubs" in sys.argv
 
-    # Handle -ubs (ultra brief set): run for block sizes 15, 30, 60 and print only the "##" line for each
+    # Handle -ubs (ultra brief set): do range of block sizes, print only the "##" summary line for each
     if ultra_brief_set:
-        for bs in [15, 30, 60]:
+        for bs in [10, 15, 20, 25, 30, 60, 120, 240]:
             blocks, sats, snrs, hdops, vdops, prns_by_block = parse_nmea_log(input_file, bs)
             rows = []
             for block in sorted(blocks):
