@@ -2,7 +2,7 @@
 
 # Compute statistics from NMEA GPS / GNSS log files
 # shows stats for separate 15-minute blocks (or other N)
-# J.Beale 2025-07-14
+# J.Beale 2025-07-19
 
 import pynmea2
 import math
@@ -12,8 +12,9 @@ import numpy as np
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 import os
+import argparse
 
-VERSION = "DoStats-GPS v1.57 2025-07-18"
+VERSION = "DoStats-GPS v1.58 2025-07-19"
 
 def convert_to_decimal(coord, direction):
     degrees = int(float(coord) / 100)
@@ -314,25 +315,54 @@ def showMeans(df, date_str, block_size):
     return comment_lines
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="DoStats-GPS")
+    parser.add_argument("input_file", help="Input NMEA log file")
+    parser.add_argument("-nd", action="store_true", help="No per-block details")
+    parser.add_argument("-ub", action="store_true", help="Ultra brief 1-line output")
+    parser.add_argument("-ubs", action="store_true", help="Ultra brief; set of block sizes")
+    parser.add_argument("-bs", type=int, default=15, help="Block size in minutes")
+    parser.add_argument("-b", type=float, default=0.0, help="Skip first x.xx hours of data")
+    parser.add_argument("-e", type=float, default=None, help="End processing at x.xx hours after start of data")  # <-- new option
+    return parser.parse_args()
+
 # =============================================================================
 if __name__ == '__main__':
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} input_file [-nd] [-bs <block_size_minutes>] [-ub] [-ubs]")
-        sys.exit(1)
+    args = parse_args()
+    input_file = args.input_file
+    block_size = args.bs
+    skip_hours = args.b
+    end_hours = args.e
 
-    input_file = sys.argv[1]
     if not os.path.isfile(input_file):
         print(f"Error: input file '{input_file}' does not exist.")
         sys.exit(1)
 
-    no_details = "-nd" in sys.argv
-    ultra_brief = "-ub" in sys.argv
-    ultra_brief_set = "-ubs" in sys.argv
+    no_details = args.nd
+    ultra_brief = args.ub
+    ultra_brief_set = args.ubs
 
     # Handle -ubs (ultra brief set): do range of block sizes, print only the "##" summary line for each
     if ultra_brief_set:
         for bs in [10, 15, 20, 25, 30, 60, 120, 240]:
             blocks, sats, snrs, hdops, vdops, prns_by_block = parse_nmea_log(input_file, bs)
+            # --- Apply skip_hours and end_hours filter to blocks before stats calculation ---
+            if (skip_hours > 0 or end_hours is not None) and blocks:
+                min_block_time = min(blocks.keys())
+                if skip_hours > 0:
+                    skip_time = min_block_time + timedelta(hours=skip_hours)
+                else:
+                    skip_time = min_block_time
+                if end_hours is not None:
+                    end_time = min_block_time + timedelta(hours=end_hours)
+                else:
+                    end_time = max(blocks.keys())
+                blocks = {k: v for k, v in blocks.items() if k >= skip_time and k <= end_time}
+                sats = {k: v for k, v in sats.items() if k >= skip_time and k <= end_time}
+                snrs = {k: v for k, v in snrs.items() if k >= skip_time and k <= end_time}
+                hdops = {k: v for k, v in hdops.items() if k >= skip_time and k <= end_time}
+                vdops = {k: v for k, v in vdops.items() if k >= skip_time and k <= end_time}
+                prns_by_block = {k: v for k, v in prns_by_block.items() if k >= skip_time and k <= end_time}
             rows = []
             for block in sorted(blocks):
                 stats = calculate_block_stats(
@@ -357,18 +387,27 @@ if __name__ == '__main__':
                     break
         sys.exit(0)
 
-    block_size = 15
-    if "-bs" in sys.argv:
-        try:
-            idx = sys.argv.index("-bs")
-            block_size = int(sys.argv[idx + 1])
-        except (ValueError, IndexError):
-            print("Usage: -bs <block_size_minutes>")
-            sys.exit(1)
-
     if not ultra_brief:
         print(VERSION)
     blocks, sats, snrs, hdops, vdops, prns_by_block = parse_nmea_log(input_file, block_size)
+
+    # Apply skip_hours and end_hours filter to blocks before stats calculation
+    if skip_hours > 0 or end_hours is not None:
+        min_block_time = min(blocks.keys())
+        if skip_hours > 0:
+            skip_time = min_block_time + timedelta(hours=skip_hours)
+        else:
+            skip_time = min_block_time
+        if end_hours is not None:
+            end_time = min_block_time + timedelta(hours=end_hours)
+        else:
+            end_time = max(blocks.keys())
+        blocks = {k: v for k, v in blocks.items() if k >= skip_time and k <= end_time}
+        sats = {k: v for k, v in sats.items() if k >= skip_time and k <= end_time}
+        snrs = {k: v for k, v in snrs.items() if k >= skip_time and k <= end_time}
+        hdops = {k: v for k, v in hdops.items() if k >= skip_time and k <= end_time}
+        vdops = {k: v for k, v in vdops.items() if k >= skip_time and k <= end_time}
+        prns_by_block = {k: v for k, v in prns_by_block.items() if k >= skip_time and k <= end_time}
 
     rows = []
     for block in sorted(blocks):
@@ -380,7 +419,7 @@ if __name__ == '__main__':
             vdops.get(block, []),
             prns_by_block.get(block, set())
         )
-        if stats:  # Only append if stats is not empty
+        if stats:
             stats['block_start_utc'] = block.strftime('%Y-%m-%d %H:%M:%S')
             rows.append(stats)
 
